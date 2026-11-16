@@ -1,102 +1,188 @@
+#!/bin/bash
+# music-notify — instant track notifications from an MPRIS player.
+#
+# Reacts to playerctl metadata signals instead of polling, so a new track is
+# shown ~0.1-0.2s after it starts. One notification per track: it is replaced
+# in place via a fixed notification id instead of stacking up.
+
 PLAYER_PREFIX="chromium.instance"
+APP_NAME="soundcloud"
 NOTIFICATION_ID=13371488
 LOCK_FILE="/tmp/music-notify.lock"
 ART_DIR="/tmp/music-notify-art"
+STATE_FILE="/tmp/music-notify.current"
+SETTLE=0.15   # seconds to collect burst metadata updates for the same track
 
-exec 9>"$LOCK_FILE"
+META_FMT=$'{{artist}}\x1f{{title}}\x1f{{album}}\x1f{{mpris:artUrl}}'
 
-if ! flock -n 9; then
-    exit 0
-fi
+exec {LOCK_FD}>"$LOCK_FILE"
+flock -n "$LOCK_FD" || exit 0
 
 mkdir -p "$ART_DIR"
 
-last_track=""
-candidate_track=""
-candidate_count=0
+# Prints the first matching player name, preferring one that is actually playing.
+find_player() {
+    local c fallback=""
+    while IFS= read -r c; do
+        case "$c" in
+            "$PLAYER_PREFIX"*) ;;
+            *) continue ;;
+        esac
+        case "$(playerctl -p "$c" status 2>/dev/null)" in
+            Playing) printf '%s\n' "$c"; return 0 ;;
+            Paused|"") [ -n "$fallback" ] || fallback="$c" ;;
+        esac
+    done < <(playerctl -l 2>/dev/null)
+    [ -n "$fallback" ] && printf '%s\n' "$fallback"
+}
 
-while true; do
-    PLAYER=""
+# Sends (or replaces) the notification and remembers which track is current.
+send_notification() { # summary body icon key
+    local summary="$1" body="$2" icon="$3" key="$4"
 
-    while IFS= read -r candidate; do
-        if playerctl -p "$candidate" status >/dev/null 2>&1; then
-            PLAYER="$candidate"
-            break
-        fi
-    done < <(
-        playerctl -l 2>/dev/null | grep "^${PLAYER_PREFIX}"
-    )
-
-    if [ -z "$PLAYER" ]; then
-        sleep 2
-        continue
-    fi
-
-    metadata="$(
-        playerctl -p "$PLAYER" metadata \
-            --format $'{{artist}}\t{{title}}\t{{mpris:artUrl}}' \
-            2>/dev/null
-    )"
-
-    IFS=$'\t' read -r artist title artUrl <<< "$metadata"
-
-    if [ -z "$title" ]; then
-        sleep 1
-        continue
-    fi
-
-    track="${artist}|||${title}"
-
-    if [ "$track" = "$candidate_track" ]; then
-        candidate_count=$((candidate_count + 1))
-    else
-        candidate_track="$track"
-        candidate_count=1
-    fi
-
-    if [ "$candidate_count" -lt 3 ] || [ "$track" = "$last_track" ]; then
-        sleep 1
-        continue
-    fi
-
-    last_track="$track"
-    icon=""
-
-    case "$artUrl" in
-        file://*)
-            icon="${artUrl#file://}"
-            ;;
-        http://*|https://*)
-            artFile="$ART_DIR/$(printf '%s' "$artUrl" | sha256sum | cut -d' ' -f1)"
-
-            if [ ! -s "$artFile" ]; then
-                curl -LfsS --max-time 10 "$artUrl" -o "$artFile" 2>/dev/null || rm -f "$artFile"
-            fi
-
-            [ -s "$artFile" ] && icon="$artFile"
-            ;;
-    esac
-
-    makoctl dismiss --all >/dev/null 2>&1
+    printf '%s' "$key" > "$STATE_FILE"
 
     if [ -n "$icon" ] && [ -f "$icon" ]; then
         notify-send \
-            --app-name="soundcloud" \
+            --app-name="$APP_NAME" \
             --replace-id="$NOTIFICATION_ID" \
             --urgency=low \
             --expire-time=4000 \
             --icon="$icon" \
-            "${artist:-Unknown}" \
-            "$title"
+            "$summary" "$body"
     else
         notify-send \
-            --app-name="soundcloud" \
+            --app-name="$APP_NAME" \
             --replace-id="$NOTIFICATION_ID" \
             --urgency=low \
             --expire-time=4000 \
-            "${artist:-Unknown}" \
-            "$title"
+            "$summary" "$body"
+    fi
+}
+
+# Downloads artwork in the background and refreshes the notification only if
+# the same track is still playing. Keeps the notification instant.
+fetch_art() { # url dest summary body key
+    local url="$1" dest="$2" summary="$3" body="$4" key="$5" tmp
+
+    tmp="$(mktemp "$ART_DIR/.download.XXXXXX")" || return
+    if curl -LfsS --max-time 15 "$url" -o "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$dest"
+        if [ "$(cat "$STATE_FILE" 2>/dev/null)" = "$key" ]; then
+            send_notification "$summary" "$body" "$dest" "$key"
+        fi
+    else
+        rm -f "$tmp"
+    fi
+}
+
+last_key=""
+last_art=""
+FOLLOW_PID=""
+META_FD=""
+
+stop_follow() {
+    [ -n "$FOLLOW_PID" ] || return 0
+    kill "$FOLLOW_PID" 2>/dev/null
+    wait "$FOLLOW_PID" 2>/dev/null
+    [ -n "$META_FD" ] && exec {META_FD}<&-
+    FOLLOW_PID=""
+    META_FD=""
+}
+
+start_follow() {
+    stop_follow
+    coproc META { exec playerctl -p "$1" metadata --format "$META_FMT" --follow 2>/dev/null; }
+    FOLLOW_PID="$META_PID"
+    META_FD="${META[0]}"
+}
+
+trap 'stop_follow; exit 0' INT TERM
+trap 'stop_follow' EXIT
+
+while true; do
+    PLAYER="$(find_player)"
+
+    if [ -z "$PLAYER" ]; then
+        sleep 0.5
+        continue
     fi
 
-    sleep 1
+    start_follow "$PLAYER"
+
+    while IFS=$'\x1f' read -r -u "$META_FD" artist title album artUrl; do
+        # Metadata often arrives in several signals (title, then artist, then
+        # artUrl). Wait for the burst to settle and read the final values.
+        sleep "$SETTLE"
+
+        fresh="$(playerctl -p "$PLAYER" metadata --format "$META_FMT" 2>/dev/null)" || continue
+        IFS=$'\x1f' read -r artist title album artUrl <<< "$fresh"
+
+        [ -n "$title" ] || continue
+        [ "$(playerctl -p "$PLAYER" status 2>/dev/null)" = "Playing" ] || continue
+
+        key="${artist}|||${title}"
+
+        if [ "$key" = "$last_key" ]; then
+            # Same track: just refresh the cover if it appeared late.
+            [ -n "$artUrl" ] && [ "$artUrl" != "$last_art" ] || continue
+
+            summary="${artist:-Unknown artist}"
+            body="$title"
+            [ -n "$album" ] && body+=$'\n'"$album"
+
+            icon=""
+            pending=""
+            case "$artUrl" in
+                file://*) icon="${artUrl#file://}" ;;
+                http://*|https://*)
+                    icon="$ART_DIR/$(printf '%s' "$artUrl" | sha256sum | cut -d' ' -f1)"
+                    if [ ! -s "$icon" ]; then
+                        pending="$icon"
+                        icon=""
+                    fi
+                    ;;
+            esac
+
+            if [ -n "$icon" ] && [ -f "$icon" ]; then
+                send_notification "$summary" "$body" "$icon" "$key"
+                last_art="$artUrl"
+            elif [ -n "$pending" ]; then
+                fetch_art "$artUrl" "$pending" "$summary" "$body" "$key" &
+            fi
+            continue
+        fi
+
+        last_key="$key"
+        last_art="$artUrl"
+
+        summary="${artist:-Unknown artist}"
+        body="$title"
+        [ -n "$album" ] && body+=$'\n'"$album"
+
+        icon=""
+        pending=""
+        case "$artUrl" in
+            file://*)
+                icon="${artUrl#file://}"
+                ;;
+            http://*|https://*)
+                icon="$ART_DIR/$(printf '%s' "$artUrl" | sha256sum | cut -d' ' -f1)"
+                if [ ! -s "$icon" ]; then
+                    pending="$icon"
+                    icon=""
+                fi
+                ;;
+        esac
+
+        send_notification "$summary" "$body" "$icon" "$key"
+
+        if [ -n "$pending" ]; then
+            fetch_art "$artUrl" "$pending" "$summary" "$body" "$key" &
+        fi
+    done
+
+    # Player went away (browser closed, paused tab dropped, etc.).
+    stop_follow
+    sleep 0.5
 done

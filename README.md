@@ -16,14 +16,20 @@ via MPRIS) and shows a pop-up notification with artwork, artist and track title.
 ### Что делает
 
 - Ищет активный MPRIS-плеер с именем, начинающимся на `chromium.instance`
-  (Chrome, Chromium, Brave, Vivaldi, Edge и т.п. через `playerctl`).
-- Постоянно читает метаданные: `artist`, `title`, `mpris:artUrl`.
-- Ждёт, пока один и тот же трек продержится 3 подряд опроса (защита от ложных
-  срабатываний при рекламе, переключениях и подгрузке метаданных).
+  (Chrome, Chromium, Brave, Vivaldi, Edge и т.п. через `playerctl`), отдавая
+  приоритет играющему.
+- Подписывается на изменения метаданных (`playerctl metadata --follow`), поэтому
+  уведомление появляется почти мгновенно (~0.2 с), а не после опроса по таймеру.
+- Короткая пауза 0.15 с собирает «пачку» обновлений одного трека (title, artist,
+  artUrl приходят отдельными сигналами) и показывает уведомление один раз.
+- Читает `artist`, `title`, `album`, `mpris:artUrl`: исполнитель и альбом идут
+  в тексте, обложка — в иконке.
 - Для обложек по `http(s)://` скачивает картинку через `curl` в `/tmp/music-notify-art`
-  и кэширует её по SHA-256 от URL. Локальные `file://`-обложки используются как есть.
-- Убирает старые уведомления (`makoctl dismiss --all`) и показывает новое через
-  `notify-send` с фиксированным `--replace-id`, низким приоритетом и временем жизни 4 секунды.
+  и кэширует её по SHA-256 от URL. Скачивание идёт в фоне и обновляет уже
+  показанное уведомление, не задерживая его. Локальные `file://`-обложки
+  используются как есть.
+- Обновляет одно и то же уведомление через `--replace-id` (низкий приоритет,
+  4 секунды), а не создаёт новые. Чужие уведомления не трогает.
 - Не запускается второй раз: использует `flock` на `/tmp/music-notify.lock`.
 
 ### Зависимости
@@ -35,7 +41,7 @@ via MPRIS) and shows a pop-up notification with artwork, artist and track title.
 | `curl` | скачивание обложек по HTTP(S) |
 | `flock` (`util-linux`) | защита от повторного запуска |
 | `sha256sum` (`coreutils`) | имя файла кэша обложки |
-| `mako` (`makoctl`) | закрытие старых уведомлений (необязательно) |
+| `mako` (или другой демон уведомлений) | показ уведомлений |
 
 Стандартные утилиты `grep`, `sleep`, `mkdir` и т.д. уже есть в системе.
 
@@ -79,9 +85,11 @@ systemctl --user enable --now music-notify.service
 
 ```bash
 PLAYER_PREFIX="chromium.instance"   # какие плееры отслеживать
+APP_NAME="soundcloud"               # имя приложения в уведомлении
 NOTIFICATION_ID=13371488            # id уведомления для --replace-id
 LOCK_FILE="/tmp/music-notify.lock"  # lock-файл
 ART_DIR="/tmp/music-notify-art"     # кэш обложек
+SETTLE=0.15                         # пауза сбора обновлений метаданных, сек
 ```
 
 ### Примечания
@@ -89,8 +97,8 @@ ART_DIR="/tmp/music-notify-art"     # кэш обложек
 - Если уведомления не появляются, проверьте, что браузер отдаёт MPRIS:
   `playerctl -l` должен показывать `chromium.instance...`.
 - Кэш обложек лежит в `/tmp` и очищается системой сам.
-- Имя приложения в уведомлении жёстко задано как `soundcloud` — поменяйте `--app-name`
-  в скрипте, если нужно другое.
+- Имя приложения задаётся переменной `APP_NAME` в начале скрипта (`soundcloud`
+  по умолчанию).
 
 ---
 
@@ -99,14 +107,20 @@ ART_DIR="/tmp/music-notify-art"     # кэш обложек
 ### What it does
 
 - Finds the active MPRIS player whose name starts with `chromium.instance`
-  (Chrome, Chromium, Brave, Vivaldi, Edge, etc. via `playerctl`).
-- Continuously reads metadata: `artist`, `title`, `mpris:artUrl`.
-- Waits until the same track stays for 3 consecutive polls (prevents false positives
-  from ads, skipping and delayed metadata).
-- For `http(s)://` artwork it downloads the image with `curl` into `/tmp/music-notify-art`
-  and caches it by the SHA-256 of the URL. Local `file://` artwork is used as is.
-- Dismisses old notifications (`makoctl dismiss --all`) and shows a new one via
-  `notify-send` with a fixed `--replace-id`, low urgency and a 4-second timeout.
+  (Chrome, Chromium, Brave, Vivaldi, Edge, etc. via `playerctl`), preferring
+  the one that is actually playing.
+- Subscribes to metadata changes (`playerctl metadata --follow`), so the
+  notification appears almost instantly (~0.2 s) instead of after a poll.
+- A short 0.15 s settle window groups burst updates for one track (title, artist
+  and artUrl arrive as separate signals) and shows the notification once.
+- Reads `artist`, `title`, `album`, `mpris:artUrl`: artist and album go into the
+  text, artwork becomes the icon.
+- For `http(s)://` artwork it downloads the image with `curl` into
+  `/tmp/music-notify-art` and caches it by the SHA-256 of the URL. Downloading
+  happens in the background and refreshes the already shown notification
+  instead of delaying it. Local `file://` artwork is used as is.
+- Updates one notification in place via `--replace-id` (low urgency, 4 seconds)
+  instead of stacking new ones, and leaves other notifications alone.
 - Refuses to run twice: uses `flock` on `/tmp/music-notify.lock`.
 
 ### Dependencies
@@ -118,7 +132,7 @@ ART_DIR="/tmp/music-notify-art"     # кэш обложек
 | `curl` | download artwork over HTTP(S) |
 | `flock` (`util-linux`) | prevent duplicate instances |
 | `sha256sum` (`coreutils`) | artwork cache filename |
-| `mako` (`makoctl`) | dismiss old notifications (optional) |
+| `mako` (or any notification daemon) | show notifications |
 
 Common tools like `grep`, `sleep`, `mkdir` are already present on the system.
 
@@ -161,9 +175,11 @@ The main parameters are defined at the top of the script:
 
 ```bash
 PLAYER_PREFIX="chromium.instance"   # which players to watch
+APP_NAME="soundcloud"               # application name in notifications
 NOTIFICATION_ID=13371488            # notification id for --replace-id
 LOCK_FILE="/tmp/music-notify.lock"  # lock file
 ART_DIR="/tmp/music-notify-art"     # artwork cache
+SETTLE=0.15                         # metadata burst settle window, seconds
 ```
 
 ### Notes
@@ -171,8 +187,8 @@ ART_DIR="/tmp/music-notify-art"     # artwork cache
 - If notifications don't appear, make sure the browser exposes MPRIS:
   `playerctl -l` should list `chromium.instance...`.
 - The artwork cache lives in `/tmp` and is cleaned by the system automatically.
-- The app name in notifications is hardcoded as `soundcloud` — change `--app-name`
-  in the script if you need something else.
+- The app name is set by the `APP_NAME` variable at the top of the script
+  (`soundcloud` by default).
 
 ---
 
