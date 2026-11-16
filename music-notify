@@ -1,0 +1,102 @@
+PLAYER_PREFIX="chromium.instance"
+NOTIFICATION_ID=13371488
+LOCK_FILE="/tmp/music-notify.lock"
+ART_DIR="/tmp/music-notify-art"
+
+exec 9>"$LOCK_FILE"
+
+if ! flock -n 9; then
+    exit 0
+fi
+
+mkdir -p "$ART_DIR"
+
+last_track=""
+candidate_track=""
+candidate_count=0
+
+while true; do
+    PLAYER=""
+
+    while IFS= read -r candidate; do
+        if playerctl -p "$candidate" status >/dev/null 2>&1; then
+            PLAYER="$candidate"
+            break
+        fi
+    done < <(
+        playerctl -l 2>/dev/null | grep "^${PLAYER_PREFIX}"
+    )
+
+    if [ -z "$PLAYER" ]; then
+        sleep 2
+        continue
+    fi
+
+    metadata="$(
+        playerctl -p "$PLAYER" metadata \
+            --format $'{{artist}}\t{{title}}\t{{mpris:artUrl}}' \
+            2>/dev/null
+    )"
+
+    IFS=$'\t' read -r artist title artUrl <<< "$metadata"
+
+    if [ -z "$title" ]; then
+        sleep 1
+        continue
+    fi
+
+    track="${artist}|||${title}"
+
+    if [ "$track" = "$candidate_track" ]; then
+        candidate_count=$((candidate_count + 1))
+    else
+        candidate_track="$track"
+        candidate_count=1
+    fi
+
+    if [ "$candidate_count" -lt 3 ] || [ "$track" = "$last_track" ]; then
+        sleep 1
+        continue
+    fi
+
+    last_track="$track"
+    icon=""
+
+    case "$artUrl" in
+        file://*)
+            icon="${artUrl#file://}"
+            ;;
+        http://*|https://*)
+            artFile="$ART_DIR/$(printf '%s' "$artUrl" | sha256sum | cut -d' ' -f1)"
+
+            if [ ! -s "$artFile" ]; then
+                curl -LfsS --max-time 10 "$artUrl" -o "$artFile" 2>/dev/null || rm -f "$artFile"
+            fi
+
+            [ -s "$artFile" ] && icon="$artFile"
+            ;;
+    esac
+
+    makoctl dismiss --all >/dev/null 2>&1
+
+    if [ -n "$icon" ] && [ -f "$icon" ]; then
+        notify-send \
+            --app-name="soundcloud" \
+            --replace-id="$NOTIFICATION_ID" \
+            --urgency=low \
+            --expire-time=4000 \
+            --icon="$icon" \
+            "${artist:-Unknown}" \
+            "$title"
+    else
+        notify-send \
+            --app-name="soundcloud" \
+            --replace-id="$NOTIFICATION_ID" \
+            --urgency=low \
+            --expire-time=4000 \
+            "${artist:-Unknown}" \
+            "$title"
+    fi
+
+    sleep 1
+done
