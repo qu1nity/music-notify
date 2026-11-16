@@ -29,7 +29,8 @@ via MPRIS) and shows a pop-up notification with artwork, artist and track title.
   показанное уведомление, не задерживая его. Локальные `file://`-обложки
   используются как есть.
 - Обновляет одно и то же уведомление через `--replace-id` (низкий приоритет,
-  4 секунды), а не создаёт новые. Чужие уведомления не трогает.
+  4 секунды), а не создаёт новые; id берётся из `notify-send --print-id`.
+  Чужие уведомления не трогает.
 - Не запускается второй раз: использует `flock` на `/tmp/music-notify.lock`.
 
 ### Зависимости
@@ -86,8 +87,8 @@ systemctl --user enable --now music-notify.service
 ```bash
 PLAYER_PREFIX="chromium.instance"   # какие плееры отслеживать
 APP_NAME="soundcloud"               # имя приложения в уведомлении
-NOTIFICATION_ID=13371488            # id уведомления для --replace-id
 LOCK_FILE="/tmp/music-notify.lock"  # lock-файл
+ID_FILE="/tmp/music-notify.id"      # id текущего уведомления (автоматически)
 ART_DIR="/tmp/music-notify-art"     # кэш обложек
 SETTLE=0.15                         # пауза сбора обновлений метаданных, сек
 ```
@@ -120,7 +121,8 @@ SETTLE=0.15                         # пауза сбора обновлений
   happens in the background and refreshes the already shown notification
   instead of delaying it. Local `file://` artwork is used as is.
 - Updates one notification in place via `--replace-id` (low urgency, 4 seconds)
-  instead of stacking new ones, and leaves other notifications alone.
+  instead of stacking new ones; the id comes from `notify-send --print-id`.
+  Other notifications are left alone.
 - Refuses to run twice: uses `flock` on `/tmp/music-notify.lock`.
 
 ### Dependencies
@@ -176,8 +178,8 @@ The main parameters are defined at the top of the script:
 ```bash
 PLAYER_PREFIX="chromium.instance"   # which players to watch
 APP_NAME="soundcloud"               # application name in notifications
-NOTIFICATION_ID=13371488            # notification id for --replace-id
 LOCK_FILE="/tmp/music-notify.lock"  # lock file
+ID_FILE="/tmp/music-notify.id"      # current notification id (automatic)
 ART_DIR="/tmp/music-notify-art"     # artwork cache
 SETTLE=0.15                         # metadata burst settle window, seconds
 ```

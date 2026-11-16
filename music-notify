@@ -7,8 +7,8 @@
 
 PLAYER_PREFIX="chromium.instance"
 APP_NAME="soundcloud"
-NOTIFICATION_ID=13371488
 LOCK_FILE="/tmp/music-notify.lock"
+ID_FILE="/tmp/music-notify.id"
 ART_DIR="/tmp/music-notify-art"
 STATE_FILE="/tmp/music-notify.current"
 SETTLE=0.15   # seconds to collect burst metadata updates for the same track
@@ -37,27 +37,30 @@ find_player() {
 }
 
 # Sends (or replaces) the notification and remembers which track is current.
+# The real notification id is learned from --print-id: hardcoding it does not
+# work, because the daemon assigns its own ids and would create a new popup.
 send_notification() { # summary body icon key
     local summary="$1" body="$2" icon="$3" key="$4"
+    local prev="" id=""
+    local -a args=(--app-name="$APP_NAME" --urgency=low --expire-time=4000 --print-id)
+
+    [ -s "$ID_FILE" ] && prev="$(cat "$ID_FILE" 2>/dev/null)"
+    case "$prev" in
+        ''|*[!0-9]*) ;;
+        *) args+=(--replace-id="$prev") ;;
+    esac
+
+    if [ -n "$icon" ] && [ -f "$icon" ]; then
+        args+=(--icon="$icon")
+    fi
 
     printf '%s' "$key" > "$STATE_FILE"
 
-    if [ -n "$icon" ] && [ -f "$icon" ]; then
-        notify-send \
-            --app-name="$APP_NAME" \
-            --replace-id="$NOTIFICATION_ID" \
-            --urgency=low \
-            --expire-time=4000 \
-            --icon="$icon" \
-            "$summary" "$body"
-    else
-        notify-send \
-            --app-name="$APP_NAME" \
-            --replace-id="$NOTIFICATION_ID" \
-            --urgency=low \
-            --expire-time=4000 \
-            "$summary" "$body"
-    fi
+    id="$(notify-send "${args[@]}" "$summary" "$body" 2>/dev/null)"
+    case "$id" in
+        ''|*[!0-9]*) ;;
+        *) printf '%s' "$id" > "$ID_FILE" ;;
+    esac
 }
 
 # Downloads artwork in the background and refreshes the notification only if
